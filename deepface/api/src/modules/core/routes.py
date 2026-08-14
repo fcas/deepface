@@ -1,107 +1,304 @@
-from flask import Blueprint, request
-from deepface.api.src.modules.core import service
-from deepface.commons import logger as log
+# built-in dependencies
+from typing import Union, cast, Any, Tuple, Dict
 
-logger = log.get_singletonish_logger()
+# 3rd party dependencies
+from flask import Blueprint, request
+from numpy.typing import NDArray
+
+# project dependencies
+from deepface import __version__
+from deepface.api.src.modules.core import service
+from deepface.api.src.dependencies.variables import Variables
+from deepface.api.src.dependencies.container import Container
+from deepface.commons import image_utils
+from deepface.commons.logger import Logger
+
+logger = Logger()
 
 blueprint = Blueprint("routes", __name__)
 
 
+# pylint: disable=no-else-return, broad-except
+
+
 @blueprint.route("/")
-def home():
-    return "<h1>Welcome to DeepFace API!</h1>"
+def home() -> str:
+    return f"<h1>Welcome to DeepFace API v{__version__}!</h1>"
+
+
+def extract_image_from_request(img_key: str) -> Union[str, NDArray[Any]]:
+    """
+    Extracts an image from the request either from json or a multipart/form-data file.
+
+    Args:
+        img_key (str): The key used to retrieve the image data
+            from the request (e.g., 'img1').
+
+    Returns:
+        img (str or np.ndarray): Given image detail (base64 encoded string, image path or url)
+            or the decoded image as a numpy array.
+    """
+
+    # Check if the request is multipart/form-data (file input)
+    if request.files:
+        # request.files is instance of werkzeug.datastructures.ImmutableMultiDict
+        # file is instance of werkzeug.datastructures.FileStorage
+        file = request.files.get(img_key)
+
+        if file is None:
+            raise ValueError(f"Request form data doesn't have {img_key}")
+
+        if file.filename == "":
+            raise ValueError(f"No file uploaded for '{img_key}'")
+
+        np_img: NDArray[Any] = image_utils.load_image_from_file_storage(file)
+
+        return np_img
+    # Check if the request is coming as base64, file path or url from json or form data
+    elif request.is_json or request.form:
+        input_args = request.get_json() or request.form.to_dict()
+
+        if input_args is None:
+            raise ValueError("empty input set passed")
+
+        # this can be base64 encoded image, and image path or url
+        str_img: str = cast(str, input_args.get(img_key))
+
+        if not str_img:
+            raise ValueError(f"'{img_key}' not found in either json or form data request")
+
+        return str_img
+
+    # If neither JSON nor file input is present
+    raise ValueError(f"'{img_key}' not found in request in either json or form data")
 
 
 @blueprint.route("/represent", methods=["POST"])
-def represent():
-    input_args = request.get_json()
+def represent() -> Tuple[Dict[str, Any], int]:
+    # load injected container
+    container: Container = blueprint.container  # type: ignore[attr-defined]
+    if not container.auth_service.validate(request.headers):
+        return {"message": "Invalid or missing authentication token"}, 401
 
-    if input_args is None:
-        return {"message": "empty input set passed"}
+    input_args = (request.is_json and request.get_json()) or (
+        request.form and request.form.to_dict()
+    )
 
-    img_path = input_args.get("img") or input_args.get("img_path")
-    if img_path is None:
-        return {"message": "you must pass img_path input"}
+    try:
+        img = extract_image_from_request("img")
+    except Exception as err:
+        return {"exception": str(err)}, 400
 
-    model_name = input_args.get("model_name", "VGG-Face")
-    detector_backend = input_args.get("detector_backend", "opencv")
-    enforce_detection = input_args.get("enforce_detection", True)
-    align = input_args.get("align", True)
+    max_faces = input_args.get("max_faces")
 
-    obj = service.represent(
-        img_path=img_path,
-        model_name=model_name,
-        detector_backend=detector_backend,
-        enforce_detection=enforce_detection,
-        align=align,
+    obj, status_code = service.represent(
+        img_path=img,
+        model_name=input_args.get("model_name", "VGG-Face"),
+        detector_backend=input_args.get("detector_backend", "opencv"),
+        enforce_detection=bool(input_args.get("enforce_detection", True)),
+        align=bool(input_args.get("align", True)),
+        anti_spoofing=bool(input_args.get("anti_spoofing", False)),
+        max_faces=int(max_faces) if max_faces is not None else None,
     )
 
     logger.debug(obj)
 
-    return obj
+    return obj, status_code
 
 
 @blueprint.route("/verify", methods=["POST"])
-def verify():
-    input_args = request.get_json()
+def verify() -> Tuple[Dict[str, Any], int]:
+    # load injected container
+    container: Container = blueprint.container  # type: ignore[attr-defined]
+    if not container.auth_service.validate(request.headers):
+        return {"message": "Invalid or missing authentication token"}, 401
 
-    if input_args is None:
-        return {"message": "empty input set passed"}
+    input_args = (request.is_json and request.get_json()) or (
+        request.form and request.form.to_dict()
+    )
 
-    img1_path = input_args.get("img1") or input_args.get("img1_path")
-    img2_path = input_args.get("img2") or input_args.get("img2_path")
+    try:
+        img1 = extract_image_from_request("img1")
+    except Exception as err:
+        return {"exception": str(err)}, 400
 
-    if img1_path is None:
-        return {"message": "you must pass img1_path input"}
+    try:
+        img2 = extract_image_from_request("img2")
+    except Exception as err:
+        return {"exception": str(err)}, 400
 
-    if img2_path is None:
-        return {"message": "you must pass img2_path input"}
-
-    model_name = input_args.get("model_name", "VGG-Face")
-    detector_backend = input_args.get("detector_backend", "opencv")
-    enforce_detection = input_args.get("enforce_detection", True)
-    distance_metric = input_args.get("distance_metric", "cosine")
-    align = input_args.get("align", True)
-
-    verification = service.verify(
-        img1_path=img1_path,
-        img2_path=img2_path,
-        model_name=model_name,
-        detector_backend=detector_backend,
-        distance_metric=distance_metric,
-        align=align,
-        enforce_detection=enforce_detection,
+    verification, status_code = service.verify(
+        img1_path=img1,
+        img2_path=img2,
+        model_name=input_args.get("model_name", "VGG-Face"),
+        detector_backend=input_args.get("detector_backend", "opencv"),
+        distance_metric=input_args.get("distance_metric", "cosine"),
+        align=bool(input_args.get("align", True)),
+        enforce_detection=bool(input_args.get("enforce_detection", True)),
+        anti_spoofing=bool(input_args.get("anti_spoofing", False)),
     )
 
     logger.debug(verification)
 
-    return verification
+    return verification, status_code
 
 
 @blueprint.route("/analyze", methods=["POST"])
-def analyze():
-    input_args = request.get_json()
+def analyze() -> Tuple[Dict[str, Any], int]:
+    # load injected container
+    container: Container = blueprint.container  # type: ignore[attr-defined]
+    if not container.auth_service.validate(request.headers):
+        return {"message": "Invalid or missing authentication token"}, 401
 
-    if input_args is None:
-        return {"message": "empty input set passed"}
+    input_args = (request.is_json and request.get_json()) or (
+        request.form and request.form.to_dict()
+    )
 
-    img_path = input_args.get("img") or input_args.get("img_path")
-    if img_path is None:
-        return {"message": "you must pass img_path input"}
+    try:
+        img = extract_image_from_request("img")
+    except Exception as err:
+        return {"exception": str(err)}, 400
 
-    detector_backend = input_args.get("detector_backend", "opencv")
-    enforce_detection = input_args.get("enforce_detection", True)
-    align = input_args.get("align", True)
     actions = input_args.get("actions", ["age", "gender", "emotion", "race"])
+    # actions is the only argument instance of list or tuple
+    # if request is form data, input args can either be text or file
+    if isinstance(actions, str):
+        actions = (
+            actions.replace("[", "")
+            .replace("]", "")
+            .replace("(", "")
+            .replace(")", "")
+            .replace('"', "")
+            .replace("'", "")
+            .replace(" ", "")
+            .split(",")
+        )
 
-    demographies = service.analyze(
-        img_path=img_path,
+    demographies, status_code = service.analyze(
+        img_path=img,
         actions=actions,
-        detector_backend=detector_backend,
-        enforce_detection=enforce_detection,
-        align=align,
+        detector_backend=input_args.get("detector_backend", "opencv"),
+        enforce_detection=bool(input_args.get("enforce_detection", True)),
+        align=bool(input_args.get("align", True)),
+        anti_spoofing=bool(input_args.get("anti_spoofing", False)),
     )
 
     logger.debug(demographies)
 
-    return demographies
+    return demographies, status_code
+
+
+@blueprint.route("/register", methods=["POST"])
+def register() -> Tuple[Dict[str, Any], int]:
+    # load injected variables and container
+    variables: Variables = blueprint.variables  # type: ignore[attr-defined]
+    container: Container = blueprint.container  # type: ignore[attr-defined]
+    if not container.auth_service.validate(request.headers):
+        return {"message": "Invalid or missing authentication token"}, 401
+
+    if variables.conection_details is None:
+        return {
+            "error": "Database connection details must be provided in `DEEPFACE_CONNECTION_DETAILS`"
+            " environment variables"
+        }, 500
+
+    input_args = (request.is_json and request.get_json()) or (
+        request.form and request.form.to_dict()
+    )
+
+    try:
+        img = extract_image_from_request("img")
+    except Exception as err:
+        return {"exception": str(err)}, 400
+
+    result, status_code = service.register(
+        img=img,
+        img_name=input_args.get("img_name"),
+        model_name=input_args.get("model_name", "VGG-Face"),
+        detector_backend=input_args.get("detector_backend", "opencv"),
+        enforce_detection=bool(input_args.get("enforce_detection", True)),
+        align=bool(input_args.get("align", True)),
+        l2_normalize=bool(input_args.get("l2_normalize", False)),
+        expand_percentage=int(input_args.get("expand_percentage", 0)),
+        normalization=input_args.get("normalization", "base"),
+        anti_spoofing=bool(input_args.get("anti_spoofing", False)),
+        database_type=variables.database_type,
+        connection_details=variables.conection_details,
+    )
+
+    if status_code == 200:
+        logger.info("An image has been registered to the database.")
+    else:
+        logger.error("An error occurred while registering an image to the database.")
+
+    return result, status_code
+
+
+@blueprint.route("/search", methods=["POST"])
+def search() -> Tuple[Dict[str, Any], int]:
+    # load injected variables and container
+    variables: Variables = blueprint.variables  # type: ignore[attr-defined]
+    container: Container = blueprint.container  # type: ignore[attr-defined]
+    if not container.auth_service.validate(request.headers):
+        return {"message": "Invalid or missing authentication token"}, 401
+
+    if variables.conection_details is None:
+        return {
+            "error": "Database connection details must be provided in `DEEPFACE_CONNECTION_DETAILS`"
+            " environment variables"
+        }, 500
+
+    input_args = (request.is_json and request.get_json()) or (
+        request.form and request.form.to_dict()
+    )
+
+    try:
+        img = extract_image_from_request("img")
+    except Exception as err:
+        return {"exception": str(err)}, 400
+
+    return service.search(
+        img=img,
+        model_name=input_args.get("model_name", "VGG-Face"),
+        detector_backend=input_args.get("detector_backend", "opencv"),
+        enforce_detection=bool(input_args.get("enforce_detection", True)),
+        align=bool(input_args.get("align", True)),
+        distance_metric=input_args.get("distance_metric", "cosine"),
+        l2_normalize=bool(input_args.get("l2_normalize", False)),
+        database_type=variables.database_type,
+        connection_details=variables.conection_details,
+        search_method=input_args.get("search_method", "exact"),
+        expand_percentage=int(input_args.get("expand_percentage", 0)),
+        normalization=input_args.get("normalization", "base"),
+        anti_spoofing=bool(input_args.get("anti_spoofing", False)),
+        similarity_search=bool(input_args.get("similarity_search", False)),
+        k=int(input_args.get("k", 5)) if input_args.get("k") is not None else None,
+    )
+
+
+@blueprint.route("/build/index", methods=["POST"])
+def build_index() -> Tuple[Dict[str, Any], int]:
+    # load injected variables and container
+    variables: Variables = blueprint.variables  # type: ignore[attr-defined]
+    container: Container = blueprint.container  # type: ignore[attr-defined]
+    if not container.auth_service.validate(request.headers):
+        return {"message": "Invalid or missing authentication token"}, 401
+
+    if variables.conection_details is None:
+        return {
+            "error": "Database connection details must be provided in `DEEPFACE_CONNECTION_DETAILS`"
+            " environment variables"
+        }, 500
+
+    input_args = (request.is_json and request.get_json()) or (
+        request.form and request.form.to_dict()
+    )
+
+    return service.build_index(
+        model_name=input_args.get("model_name", "VGG-Face"),
+        detector_backend=input_args.get("detector_backend", "opencv"),
+        align=bool(input_args.get("align", True)),
+        l2_normalize=bool(input_args.get("l2_normalize", False)),
+        database_type=variables.database_type,
+        connection_details=variables.conection_details,
+    )

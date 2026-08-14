@@ -1,5 +1,7 @@
 # Benchmarks
 
+[`🎥 Video Tutorial`](https://youtu.be/eKOZawGR3y0)
+
 DeepFace offers various configurations that significantly impact accuracy, including the facial recognition model, face detector model, distance metric, and alignment mode. Our experiments conducted on the [LFW dataset](https://sefiks.com/2020/08/27/labeled-faces-in-the-wild-for-face-recognition/) using different combinations of these configurations yield the following results.
 
 You can reproduce the results by executing the `Perform-Experiments.ipynb` and `Evaluate-Results.ipynb` notebooks, respectively.

@@ -1,31 +1,35 @@
 # built-in dependencies
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Union, IO, cast, Tuple
 
 # 3rd party dependencies
 import numpy as np
+from numpy.typing import NDArray
 from tqdm import tqdm
 
 # project dependencies
 from deepface.modules import modeling, detection, preprocessing
-from deepface.extendedmodels import Gender, Race, Emotion
+from deepface.models.demography import Gender, Race, Emotion
+from deepface.modules.exceptions import UnimplementedError, SpoofDetected
 
 
+# pylint: disable=too-many-positional-arguments
 def analyze(
-    img_path: Union[str, np.ndarray],
-    actions: Union[tuple, list] = ("emotion", "age", "gender", "race"),
+    img_path: Union[str, NDArray[Any], IO[bytes], List[str], List[NDArray[Any]], List[IO[bytes]]],
+    actions: Union[Tuple[str, ...], List[str]] = ("emotion", "age", "gender", "race"),
     enforce_detection: bool = True,
     detector_backend: str = "opencv",
     align: bool = True,
     expand_percentage: int = 0,
     silent: bool = False,
-) -> List[Dict[str, Any]]:
+    anti_spoofing: bool = False,
+) -> Union[List[Dict[str, Any]], List[List[Dict[str, Any]]]]:
     """
     Analyze facial attributes such as age, gender, emotion, and race in the provided image.
 
     Args:
-        img_path (str or np.ndarray): The exact path to the image, a numpy array in BGR format,
-            or a base64 encoded image. If the source image contains multiple faces, the result will
-            include information for each detected face.
+        img_path (str, np.ndarray, IO[bytes], list): The exact path to the image,
+            a numpy array in BGR format, or a base64 encoded image. If the source image
+            contains multiple faces, the result will include information for each detected face.
 
         actions (tuple): Attributes to analyze. The default is ('age', 'gender', 'emotion', 'race').
             You can exclude some of these attributes from the analysis if needed.
@@ -34,11 +38,12 @@ def analyze(
             Set to False to avoid the exception for low-resolution images (default is True).
 
         detector_backend (string): face detector backend. Options: 'opencv', 'retinaface',
-            'mtcnn', 'ssd', 'dlib', 'mediapipe', 'yolov8', 'centerface' or 'skip'
-            (default is opencv).
+            'mtcnn', 'ssd', 'dlib', 'mediapipe', 'yolov8n', 'yolov8m', 'yolov8l', 'yolov11n',
+            'yolov11s', 'yolov11m', 'yolov11l', 'yolov12n', 'yolov12s', 'yolov12m', 'yolov12l'
+            'centerface' or 'skip' (default is opencv).
 
         distance_metric (string): Metric for measuring similarity. Options: 'cosine',
-            'euclidean', 'euclidean_l2' (default is cosine).
+            'euclidean', 'euclidean_l2', 'angular' (default is cosine).
 
         align (boolean): Perform alignment based on the eye positions (default is True).
 
@@ -46,6 +51,8 @@ def analyze(
 
         silent (boolean): Suppress or allow some log messages for a quieter analysis process
             (default is False).
+
+        anti_spoofing (boolean): Flag to enable anti spoofing (default is False).
 
     Returns:
         results (List[Dict[str, Any]]): A list of dictionaries, where each dictionary represents
@@ -97,6 +104,30 @@ def analyze(
                - 'white': Confidence score for White ethnicity.
     """
 
+    # batch input
+    if (isinstance(img_path, np.ndarray) and img_path.ndim == 4 and img_path.shape[0] > 1) or (
+        isinstance(img_path, list)
+    ):
+        batch_resp_obj: List[List[Dict[str, Any]]] = []
+        # Execute analysis for each image in the batch.
+        for single_img in img_path:
+            # Call the analyze function for each image in the batch.
+            resp_obj = analyze(
+                img_path=single_img,
+                actions=actions,
+                enforce_detection=enforce_detection,
+                detector_backend=detector_backend,
+                align=align,
+                expand_percentage=expand_percentage,
+                silent=silent,
+                anti_spoofing=anti_spoofing,
+            )
+            resp_obj = cast(List[Dict[str, Any]], resp_obj)
+
+            # Append the response object to the batch response list.
+            batch_resp_obj.append(resp_obj)
+        return batch_resp_obj
+
     # if actions is passed as tuple with single item, interestingly it becomes str here
     if isinstance(actions, str):
         actions = (actions,)
@@ -110,23 +141,30 @@ def analyze(
     # For each action, check if it is valid
     for action in actions:
         if action not in ("emotion", "age", "gender", "race"):
-            raise ValueError(
+            raise UnimplementedError(
                 f"Invalid action passed ({repr(action)})). "
                 "Valid actions are `emotion`, `age`, `gender`, `race`."
             )
     # ---------------------------------
     resp_objects = []
 
-    img_objs = detection.extract_faces(
-        img_path=img_path,
-        detector_backend=detector_backend,
-        grayscale=False,
-        enforce_detection=enforce_detection,
-        align=align,
-        expand_percentage=expand_percentage,
+    img_objs: List[Dict[str, Any]] = cast(
+        List[Dict[str, Any]],
+        detection.extract_faces(
+            img_path=img_path,
+            detector_backend=detector_backend,
+            enforce_detection=enforce_detection,
+            grayscale=False,
+            align=align,
+            expand_percentage=expand_percentage,
+            anti_spoofing=anti_spoofing,
+        ),
     )
 
     for img_obj in img_objs:
+        if anti_spoofing is True and img_obj.get("is_real", True) is False:
+            raise SpoofDetected("Spoof detected in the given image.")
+
         img_content = img_obj["face"]
         img_region = img_obj["facial_area"]
         img_confidence = img_obj["confidence"]
@@ -139,7 +177,7 @@ def analyze(
         # resize input image
         img_content = preprocessing.resize_image(img=img_content, target_size=(224, 224))
 
-        obj = {}
+        obj: Dict[str, Any] = {}
         # facial attribute analysis
         pbar = tqdm(
             range(0, len(actions)),
@@ -151,7 +189,9 @@ def analyze(
             pbar.set_description(f"Action: {action}")
 
             if action == "emotion":
-                emotion_predictions = modeling.build_model("Emotion").predict(img_content)
+                emotion_predictions = modeling.build_model(
+                    task="facial_attribute", model_name="Emotion"
+                ).predict(img_content)
                 sum_of_predictions = emotion_predictions.sum()
 
                 obj["emotion"] = {}
@@ -162,12 +202,16 @@ def analyze(
                 obj["dominant_emotion"] = Emotion.labels[np.argmax(emotion_predictions)]
 
             elif action == "age":
-                apparent_age = modeling.build_model("Age").predict(img_content)
+                apparent_age = modeling.build_model(
+                    task="facial_attribute", model_name="Age"
+                ).predict(img_content)
                 # int cast is for exception - object of type 'float32' is not JSON serializable
                 obj["age"] = int(apparent_age)
 
             elif action == "gender":
-                gender_predictions = modeling.build_model("Gender").predict(img_content)
+                gender_predictions = modeling.build_model(
+                    task="facial_attribute", model_name="Gender"
+                ).predict(img_content)
                 obj["gender"] = {}
                 for i, gender_label in enumerate(Gender.labels):
                     gender_prediction = 100 * gender_predictions[i]
@@ -176,7 +220,9 @@ def analyze(
                 obj["dominant_gender"] = Gender.labels[np.argmax(gender_predictions)]
 
             elif action == "race":
-                race_predictions = modeling.build_model("Race").predict(img_content)
+                race_predictions = modeling.build_model(
+                    task="facial_attribute", model_name="Race"
+                ).predict(img_content)
                 sum_of_predictions = race_predictions.sum()
 
                 obj["race"] = {}

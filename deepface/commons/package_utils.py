@@ -1,10 +1,13 @@
+# built-in dependencies
+import hashlib
+
 # 3rd party dependencies
 import tensorflow as tf
 
 # package dependencies
-from deepface.commons import logger as log
+from deepface.commons.logger import Logger
 
-logger = log.get_singletonish_logger()
+logger = Logger()
 
 
 def get_tf_major_version() -> int:
@@ -25,7 +28,7 @@ def get_tf_minor_version() -> int:
     return int(tf.__version__.split(".", maxsplit=-1)[1])
 
 
-def validate_for_keras3():
+def validate_for_keras3() -> None:
     tf_major = get_tf_major_version()
     tf_minor = get_tf_minor_version()
 
@@ -44,3 +47,19 @@ def validate_for_keras3():
             "tf-keras package. Please run `pip install tf-keras` "
             "or downgrade your tensorflow."
         ) from err
+
+
+def find_file_hash(file_path: str, hash_algorithm: str = "sha256") -> str:
+    """
+    Find the hash of a given file with its content
+    Args:
+        file_path (str): exact path of a given file
+        hash_algorithm (str): hash algorithm
+    Returns:
+        hash (str)
+    """
+    hash_func = hashlib.new(hash_algorithm)
+    with open(file_path, "rb") as f:
+        while chunk := f.read(8192):
+            hash_func.update(chunk)
+    return hash_func.hexdigest()
